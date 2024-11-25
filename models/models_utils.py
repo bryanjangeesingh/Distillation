@@ -2,6 +2,9 @@ import torch
 import dataclasses
 import torch.optim as optim
 
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_flash_sdp(False)
+
 from policies import AnyPrecisionAdamW
 from policies import apply_fsdp_checkpointing
 from models.fsdp import fsdp_auto_wrap_policy
@@ -10,7 +13,7 @@ from models.distillation_model import DistillationModel
 from optimum.bettertransformer import BetterTransformer
 from transformers import AutoModelForCausalLM, MT5ForConditionalGeneration, AutoTokenizer
 from configs.configs_utils import generate_peft_config, update_config
-from peft import get_peft_model, prepare_model_for_int8_training
+from peft import get_peft_model, prepare_model_for_kbit_training
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXLayer
 from transformers.models.mistral.modeling_mistral import MistralDecoderLayer
@@ -39,16 +42,24 @@ def load_model(train_config, rank):
         if "mt0" in train_config.model_name:
             return MT5ForConditionalGeneration.from_pretrained(
                 train_config.model_name,
-                load_in_8bit=True if train_config.quantization else False,
+                torch_dtype=torch.float16,  # FP16 instead of 8-bit quantization
+
+                #load_in_8bit=True if train_config.quantization else False,
                 device_map="auto" if train_config.quantization else None,
                 use_cache=use_cache,
+                use_flash_attention_2=False,  # Disable flash attention
+
             )
         else:
             return AutoModelForCausalLM.from_pretrained(
                 train_config.model_name,
-                load_in_8bit=True if train_config.quantization else False,
+                torch_dtype=torch.float16,  # FP16 instead of 8-bit quantization
+
+                #load_in_8bit=True if train_config.quantization else False,
                 device_map="auto" if train_config.quantization else None,
                 use_cache=use_cache,
+                cache_dir = "/nobackup/users/brytech/projects/condas/nlp_4gpus/Distillation_weights",
+                use_flash_attention_2=False,  # Disable flash attention
             )
     
     if not train_config.enable_fsdp:
@@ -80,7 +91,7 @@ def load_model(train_config, rank):
 
 def set_model(model, train_config, fsdp_config, rank, kwargs):
     if train_config.quantization:
-        model = prepare_model_for_int8_training(model)
+        model = prepare_model_for_kbit_training(model)
 
     if train_config.use_peft:
         peft_config = generate_peft_config(train_config, kwargs)
@@ -124,7 +135,7 @@ def get_model(train_config, fsdp_config, rank, kwargs):
 
 def get_distillation_models(train_config, distil_config, fsdp_config, rank, kwargs):
     student_tokenizer, student_model = get_model(train_config, fsdp_config, rank, kwargs)
-    
+
     teacher_fsdp_config = FSDP_CONFIG()
     update_config((teacher_fsdp_config), **dataclasses.asdict(distil_config))
     teacher_tokenizer, teacher_model = get_model(distil_config, distil_config, rank, kwargs)

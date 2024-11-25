@@ -21,7 +21,7 @@ class train_config:
     seed: int=42
     use_fp16: bool=False
     mixed_precision: bool=True
-    val_batch_size: int=1
+    val_batch_size: int=1  # Reduced from default
     peft_method: str = "lora"
     use_peft: bool=False
     output_dir: str = ""
@@ -29,10 +29,11 @@ class train_config:
     num_freeze_layers: int = 1
     quantization: bool = False
     save_model: bool = True
-    save_step: int = 1000
+    save_step: int = 100
     save_optimizer: bool=False
     use_fast_kernels: bool = False
     distillation: bool = False
     save_all: bool = False
     training_size: int = 1
     encoder_decoder: bool = False
+    gradient_checkpointing: bool = True  # Added gradient checkpointing

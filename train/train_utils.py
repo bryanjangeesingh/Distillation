@@ -8,13 +8,12 @@ from tqdm import tqdm
 from contextlib import nullcontext
 from models.memory import MemoryTrace
 from train.tools import clear_gpu_cache
-from train.evaluations import evaluation
 from train.save import save_train_params, save_model
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from models.distillation_model import DistillationLoss, preprocess_distillation_batch
 
 def train(model, train_dataloader, eval_dataloader, optimizer, lr_scheduler, gradient_accumulation_steps, train_config, distil_config, dataset_config, teacher_train_dataloader=None, teacher_eval_dataloader=None, fsdp_config=None, local_rank=None, rank=None):
-    # Weights & Biases tracking system initialization.
+    # Weights & Biases tracking system initialization
     os.environ["WANDB__SERVICE_WAIT"] = "300"
     if rank == 0:
         wandb.init(
@@ -62,14 +61,11 @@ def train(model, train_dataloader, eval_dataloader, optimizer, lr_scheduler, gra
 
     train_prep = []
     train_loss = []
-    val_ppl = []
-    val_loss = []
     epoch_times = []
     checkpoint_times = []
     results = {}
-    steps_per_eval = len(eval_dataloader)
     steps_per_epoch = len(train_dataloader)
-    best_val_loss = float("inf")
+
     for epoch in range(train_config.num_epochs):
         epoch_start_time = time.perf_counter()
         total_length = steps_per_epoch//gradient_accumulation_steps
@@ -78,7 +74,8 @@ def train(model, train_dataloader, eval_dataloader, optimizer, lr_scheduler, gra
             total_loss = 0.0
             pbar = tqdm(colour="blue", desc=f"Training Epoch: {epoch+1}", total=total_length, dynamic_ncols=True)
             for step, batch in enumerate(train_dataloader if not train_config.distillation else zip(train_dataloader, teacher_train_dataloader)):
-                if train_config.distillation: batch = preprocess_distillation_batch(batch)
+                if train_config.distillation: 
+                    batch = preprocess_distillation_batch(batch)
                 for key in batch.keys():
                     if train_config.enable_fsdp or distil_config.enable_fsdp:
                         batch[key] = batch[key].to(local_rank)
@@ -126,49 +123,27 @@ def train(model, train_dataloader, eval_dataloader, optimizer, lr_scheduler, gra
                 lr_scheduler.step()
                 pbar.set_description(f"Training Epoch: {epoch+1}/{train_config.num_epochs}, step {step}/{steps_per_epoch} completed (loss: {loss.detach().float()})")
 
-                if train_config.run_validation and ((step+1) % train_config.save_step == 0 or step+1 == steps_per_epoch):
-                    if rank == 0: print("Running evaluation...")
-                    model.eval()
-                    eval_ppl, eval_epoch_loss, eval_cross_loss, eval_dist_loss = evaluation(
-                        model, train_config, distil_config, 
-                        eval_dataloader if not train_config.distillation else zip(eval_dataloader, teacher_eval_dataloader),
-                        steps_per_eval, local_rank)
-                    model.student.train() if train_config.distillation else model.train()
-                    val_loss.append(eval_epoch_loss)
-                    val_ppl.append(eval_ppl)
-                    
+                # Save model at specified intervals without validation
+                if (step + 1) % train_config.save_step == 0 or step + 1 == steps_per_epoch:
                     if rank == 0:
-                        print(f"Perplexity {eval_ppl}, loss {eval_epoch_loss}")
-                        if train_config.distillation:
-                            wandb.log({
-                                "eval_ppl": eval_ppl,
-                                "eval_epoch_loss": eval_epoch_loss,
-                                "eval_cross_loss": eval_cross_loss,
-                                "eval_dist_loss": eval_dist_loss
-                            })
-                        else:
-                            wandb.log({
-                                "eval_ppl": eval_ppl,
-                                "eval_epoch_loss": eval_epoch_loss,
-                            })
-
-                    if eval_epoch_loss < best_val_loss or train_config.save_all:
-                        if eval_epoch_loss < best_val_loss:
-                            best_val_loss = eval_epoch_loss
-                            if rank == 0:
-                                print(f"best eval loss is {best_val_loss}")
-                        if train_config.save_model:
-                            checkpoint_start_time = time.perf_counter()
-                            save_model(
-                                model if not train_config.distillation else model.student, 
-                                optimizer, ((steps_per_epoch*epoch)+step), train_config, distil_config, fsdp_config, rank
-                            )
-                            checkpoint_end_time = time.perf_counter() - checkpoint_start_time
-                            checkpoint_times.append(checkpoint_end_time)
+                        print(f"Saving model at epoch {epoch+1}, step {step+1}")
+                    checkpoint_start_time = time.perf_counter()
+                    save_model(
+                        model if not train_config.distillation else model.student,
+                        optimizer,
+                        ((steps_per_epoch * epoch) + step),
+                        train_config,
+                        distil_config,
+                        fsdp_config,
+                        rank
+                    )
+                    checkpoint_end_time = time.perf_counter() - checkpoint_start_time
+                    checkpoint_times.append(checkpoint_end_time)
                     clear_gpu_cache(rank)
             pbar.close()
         
-        if rank == 0: print(memtrace)
+        if rank == 0:
+            print(memtrace)
         epoch_end_time = time.perf_counter()-epoch_start_time
         epoch_times.append(epoch_end_time)
 
@@ -192,19 +167,12 @@ def train(model, train_dataloader, eval_dataloader, optimizer, lr_scheduler, gra
             })
 
     avg_epoch_time = sum(epoch_times) / len(epoch_times)
-    avg_checkpoint_time = sum(
-        checkpoint_times) / len(checkpoint_times) if len(checkpoint_times) > 0 else 0
+    avg_checkpoint_time = sum(checkpoint_times) / len(checkpoint_times) if len(checkpoint_times) > 0 else 0
     avg_train_prep = sum(train_prep)/len(train_prep)
     avg_train_loss = sum(train_loss)/len(train_loss)
-    if train_config.run_validation:
-        avg_eval_prep = sum(val_ppl)/len(val_ppl)
-        avg_eval_loss = sum(val_loss)/len(val_loss)
 
     results['avg_train_prep'] = avg_train_prep
     results['avg_train_loss'] = avg_train_loss
-    if train_config.run_validation:
-        results['avg_eval_prep'] = avg_eval_prep
-        results['avg_eval_loss'] = avg_eval_loss
     results["avg_epoch_time"] = avg_epoch_time
     results["avg_checkpoint_time"] = avg_checkpoint_time
 
