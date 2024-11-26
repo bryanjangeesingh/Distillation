@@ -58,7 +58,6 @@ def load_model(train_config, rank):
                 #load_in_8bit=True if train_config.quantization else False,
                 device_map="auto" if train_config.quantization else None,
                 use_cache=use_cache,
-                cache_dir = "/nobackup/users/brytech/projects/condas/nlp_4gpus/Distillation_weights",
                 use_flash_attention_2=False,  # Disable flash attention
             )
     
